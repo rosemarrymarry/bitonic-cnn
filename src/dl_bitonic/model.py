@@ -38,8 +38,22 @@ class BitonicGuidedDenoiser(nn.Module):
         }
 
 
-class FixedFusionDenoiser(BitonicGuidedDenoiser):
-    """Full branches with a fixed 0.5 fusion weight."""
+class FixedFusionDenoiser(nn.Module):
+    """Full branches with a fixed 0.5 fusion weight.
+
+    This control deliberately has no trainable gate head, so its parameter count
+    matches DeepOnlyDenoiser. The only difference is the fixed bitonic branch.
+    """
+
+    def __init__(self, base_channels: int = 32, bitonic_radius: int = 2) -> None:
+        super().__init__()
+        self.bitonic = DifferentiableRankBitonicFilter(
+            radius=bitonic_radius,
+            centile=8.0,
+            correction_sigma=1.0,
+        )
+        self.backbone = TinyUNet(in_ch=10, base=base_channels)
+        self.head_denoise = nn.Conv2d(base_channels, 3, 3, padding=1)
 
     def forward(self, y: torch.Tensor, sigma_map: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         xb = self.bitonic(y)
