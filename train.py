@@ -108,6 +108,8 @@ def main() -> None:
         train=False,
         seed=args.seed,
         eval_patch_size=args.val_patch_size,
+        deterministic_noise=True,
+        noise_seed=args.seed + 1000,
     )
     if args.max_val_samples is not None and args.max_val_samples > 0:
         val_set = torch.utils.data.Subset(val_set, list(range(min(len(val_set), args.max_val_samples))))

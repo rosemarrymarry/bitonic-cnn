@@ -64,6 +64,8 @@ def main() -> None:
         train=False,
         seed=args.seed,
         eval_patch_size=args.eval_patch_size,
+        deterministic_noise=True,
+        noise_seed=args.seed + 1000,
     )
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=args.workers)
 
@@ -94,6 +96,7 @@ def main() -> None:
         "psnr_gain_mean": float(np.mean(psnr_gain_vals)),
         "eval_patch_size": args.eval_patch_size,
         "seed": args.seed,
+        "noise_seed": args.seed + 1000,
     }
 
     print(json.dumps(result, indent=2))

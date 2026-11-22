@@ -59,6 +59,8 @@ class GaussianNoisyPairDataset(Dataset):
         train: bool = True,
         seed: int = 42,
         eval_patch_size: int | None = None,
+        deterministic_noise: bool = False,
+        noise_seed: int = 123,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -69,6 +71,8 @@ class GaussianNoisyPairDataset(Dataset):
         self.train = train
         self.eval_patch_size = eval_patch_size if eval_patch_size is not None else patch_size
         self.rng = np.random.default_rng(seed)
+        self.deterministic_noise = bool(deterministic_noise)
+        self.noise_seed = int(noise_seed)
 
         folder = self.root / split
         if not folder.exists():
@@ -102,7 +106,15 @@ class GaussianNoisyPairDataset(Dataset):
 
         sigma = self._sample_sigma()
         sigma_norm = sigma / 255.0
-        noise = torch.randn_like(clean) * sigma_norm
+        if self.deterministic_noise:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(
+                int(self.noise_seed + index * 1000003 + round(sigma * 1000))
+            )
+            noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
+        else:
+            noise = torch.randn_like(clean)
+        noise = noise * sigma_norm
         noisy = (clean + noise).clamp(0.0, 1.0)
 
         sigma_map = torch.full((1, clean.shape[1], clean.shape[2]), sigma / 75.0, dtype=clean.dtype)
