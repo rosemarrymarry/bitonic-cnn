@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -37,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-ssim", type=float, default=0.2)
     p.add_argument("--w-edge", type=float, default=0.05)
     p.add_argument("--w-cons", type=float, default=0.05)
+    p.add_argument("--w-deep", type=float, default=0.5, help="Direct L1 supervision for the CNN branch.")
+    p.add_argument("--w-gate", type=float, default=0.05, help="Regularization against early gate saturation.")
     p.add_argument("--amp", action="store_true")
     p.add_argument("--val-batch-size", type=int, default=1)
     p.add_argument("--val-patch-size", type=int, default=32, help="Reduce validation crop size to control bitonic memory use")
@@ -154,6 +157,9 @@ def main() -> None:
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running = []
+        gate_means = []
+        gate_saturations = []
+        deep_losses = []
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", ncols=120)
         for batch in pbar:
@@ -174,13 +180,25 @@ def main() -> None:
                     consistency_out = model.bitonic(pred, aux.get("tau", sigma_map.mean(dim=1, keepdim=True)))
                 loss, stat = criterion(pred, clean, consistency_ref, consistency_out)
 
+                if args.model_kind != "deep_only":
+                    xd_l1 = F.l1_loss(aux["xd"], clean)
+                    gate_reg = ((aux["gate"] - 0.5) ** 2).mean()
+                    loss = loss + args.w_deep * xd_l1 + args.w_gate * gate_reg
+                    stat["xd_l1"] = float(xd_l1.detach().item())
+                    stat["gate_reg"] = float(gate_reg.detach().item())
+                    gate_means.append(float(aux["gate"].mean().detach().item()))
+                    gate_saturations.append(float((aux["gate"] > 0.9).float().mean().detach().item()))
+                    deep_losses.append(float(xd_l1.detach().item()))
+
+                stat["total"] = float(loss.detach().item())
+
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
-            running.append(stat["total"])
+            running.append(float(loss.detach().item()))
             pbar.set_postfix(loss=f"{np.mean(running):.4f}")
 
         scheduler.step()
@@ -192,11 +210,18 @@ def main() -> None:
             "val_psnr": val_psnr,
             "val_ssim": val_ssim,
             "lr": float(optimizer.param_groups[0]["lr"]),
+            "gate_mean": float(np.mean(gate_means)) if gate_means else None,
+            "gate_saturation": float(np.mean(gate_saturations)) if gate_saturations else None,
+            "deep_l1": float(np.mean(deep_losses)) if deep_losses else None,
         }
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec) + "\n")
 
-        print(f"[Epoch {epoch}] train_loss={rec['train_loss']:.4f} val_psnr={val_psnr:.3f} val_ssim={val_ssim:.4f}")
+        print(
+            f"[Epoch {epoch}] train_loss={rec['train_loss']:.4f} "
+            f"val_psnr={val_psnr:.3f} val_ssim={val_ssim:.4f} "
+            f"gate_mean={rec['gate_mean']} gate_sat={rec['gate_saturation']} deep_l1={rec['deep_l1']}"
+        )
 
         latest_path = save_dir / "latest.pt"
         torch.save(
