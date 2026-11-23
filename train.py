@@ -154,7 +154,16 @@ def main() -> None:
             scaler.load_state_dict(ckpt["scaler"])
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_psnr = float(ckpt.get("best_psnr", -1.0))
-        print(f"Resumed from {args.resume} at epoch {start_epoch}")
+
+        # A resumed run may use a new total epoch budget. Reset the cosine
+        # schedule horizon and start LR so the remaining epochs follow the
+        # requested schedule instead of the old checkpoint horizon.
+        for group in optimizer.param_groups:
+            group["lr"] = args.lr
+        scheduler.T_max = args.epochs
+        scheduler.eta_min = 1e-6
+        scheduler.last_epoch = start_epoch - 1
+        print(f"Resumed from {args.resume} at epoch {start_epoch}; reset scheduler T_max={args.epochs}, lr={args.lr}")
 
     for epoch in range(start_epoch, args.epochs + 1):
         model.train()
