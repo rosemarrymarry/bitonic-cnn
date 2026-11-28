@@ -13,9 +13,14 @@ def _is_image(path: Path) -> bool:
     return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
-def _load_rgb(path: Path) -> torch.Tensor:
-    img = Image.open(path).convert("RGB")
-    arr = np.asarray(img, dtype=np.float32) / 255.0
+def _load_rgb(path: Path, grayscale: bool = False) -> torch.Tensor:
+    if grayscale:
+        img = Image.open(path).convert("L")
+        arr = np.asarray(img, dtype=np.float32)[..., None] / 255.0
+        arr = np.repeat(arr, 3, axis=2)
+    else:
+        img = Image.open(path).convert("RGB")
+        arr = np.asarray(img, dtype=np.float32) / 255.0
     ten = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
     return ten
 
@@ -61,6 +66,7 @@ class GaussianNoisyPairDataset(Dataset):
         eval_patch_size: int | None = None,
         deterministic_noise: bool = False,
         noise_seed: int = 123,
+        grayscale_mode: bool = False,
     ) -> None:
         self.root = Path(root)
         self.split = split
@@ -73,6 +79,7 @@ class GaussianNoisyPairDataset(Dataset):
         self.rng = np.random.default_rng(seed)
         self.deterministic_noise = bool(deterministic_noise)
         self.noise_seed = int(noise_seed)
+        self.grayscale_mode = bool(grayscale_mode)
 
         folder = self.root / split
         if not folder.exists():
@@ -90,7 +97,7 @@ class GaussianNoisyPairDataset(Dataset):
         return float(self.rng.uniform(self.sigma_min, self.sigma_max))
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        clean = _load_rgb(self.files[index])
+        clean = _load_rgb(self.files[index], grayscale=self.grayscale_mode)
         if self.train:
             clean = random_crop(clean, self.patch_size, self.rng)
             clean = augment(clean, self.rng)
@@ -106,15 +113,18 @@ class GaussianNoisyPairDataset(Dataset):
 
         sigma = self._sample_sigma()
         sigma_norm = sigma / 255.0
+        noise_shape = (1, clean.shape[1], clean.shape[2]) if self.grayscale_mode else clean.shape
         if self.deterministic_noise:
             generator = torch.Generator(device="cpu")
             generator.manual_seed(
                 int(self.noise_seed + index * 1000003 + round(sigma * 1000))
             )
-            noise = torch.randn(clean.shape, generator=generator, dtype=clean.dtype)
+            noise = torch.randn(noise_shape, generator=generator, dtype=clean.dtype)
         else:
-            noise = torch.randn_like(clean)
+            noise = torch.randn(noise_shape, dtype=clean.dtype)
         noise = noise * sigma_norm
+        if self.grayscale_mode:
+            noise = noise.repeat(3, 1, 1)
         noisy = (clean + noise).clamp(0.0, 1.0)
 
         sigma_map = torch.full((1, clean.shape[1], clean.shape[2]), sigma / 75.0, dtype=clean.dtype)

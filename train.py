@@ -45,7 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-patch-size", type=int, default=32, help="Reduce validation crop size to control bitonic memory use")
     p.add_argument("--max-val-samples", type=int, default=4, help="Limit validation set size to avoid VRAM spikes on Kaggle")
     p.add_argument("--kaggle-safe", action="store_true", help="Use a conservative batch/patch configuration for low-memory Kaggle runs")
-    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
+    p.add_argument("--resume", type=str, default=None, help="Path to checkpoint to fully resume training from")
+    p.add_argument("--init-from", type=str, default=None, help="Load model weights only, then start a new training stage")
+    p.add_argument("--grayscale-mode", action="store_true", help="Train on grayscale images repeated to RGB with repeated single-channel noise")
     return p.parse_args()
 
 
@@ -99,6 +101,7 @@ def main() -> None:
         sigma_max=args.sigma_max,
         train=True,
         seed=args.seed,
+        grayscale_mode=args.grayscale_mode,
     )
     val_set = GaussianNoisyPairDataset(
         root=args.data_root,
@@ -110,6 +113,7 @@ def main() -> None:
         eval_patch_size=args.val_patch_size,
         deterministic_noise=True,
         noise_seed=args.seed + 1000,
+        grayscale_mode=args.grayscale_mode,
     )
     if args.max_val_samples is not None and args.max_val_samples > 0:
         val_set = torch.utils.data.Subset(val_set, list(range(min(len(val_set), args.max_val_samples))))
@@ -135,6 +139,14 @@ def main() -> None:
         base_channels=args.base_ch,
         bitonic_radius=args.bitonic_radius,
     ).to(device)
+
+    if args.init_from:
+        if args.resume:
+            raise ValueError("--init-from and --resume are mutually exclusive")
+        init_ckpt = torch.load(args.init_from, map_location="cpu")
+        init_state = init_ckpt.get("model", init_ckpt)
+        model.load_state_dict(init_state, strict=True)
+        print(f"Initialized model weights from {args.init_from}; starting a new training stage")
 
     criterion = CompositeLoss(w_ssim=args.w_ssim, w_edge=args.w_edge, w_cons=args.w_cons)
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
