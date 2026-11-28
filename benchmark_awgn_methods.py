@@ -12,6 +12,11 @@ import torch.nn as nn
 from PIL import Image
 from tqdm import tqdm
 
+try:
+    import bm3d as bm3d_lib
+except ImportError:
+    bm3d_lib = None
+
 from src.dl_bitonic.inference import infer_tiled
 from src.dl_bitonic.metrics import psnr, ssim
 from src.dl_bitonic.model import build_model as build_v2_model
@@ -121,6 +126,33 @@ def build_model(
     return model
 
 
+def run_bm3d(noisy: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Run BM3D on a grayscale or RGB image.
+
+    For RGB input, BM3D is applied independently to each channel. This is
+    intentionally labelled channel-wise BM3D in benchmark outputs; it is not a
+    CBM3D implementation.
+    """
+    if bm3d_lib is None:
+        raise RuntimeError(
+            "BM3D requested but the `bm3d` package is not installed. "
+            "Install it with `pip install bm3d`."
+        )
+
+    arr = noisy.detach().cpu().numpy()
+    sigma_psd = float(sigma) / 255.0
+    kwargs = {"sigma_psd": sigma_psd}
+    if hasattr(bm3d_lib, "BM3DStages"):
+        kwargs["stage_arg"] = bm3d_lib.BM3DStages.ALL_STAGES
+
+    if arr.shape[0] == 1:
+        out = bm3d_lib.bm3d(arr[0], **kwargs)
+        return torch.from_numpy(out[None, ...]).float()
+
+    channels = [bm3d_lib.bm3d(arr[c], **kwargs) for c in range(arr.shape[0])]
+    return torch.from_numpy(np.stack(channels, axis=0)).float()
+
+
 def infer_model(
     model: nn.Module,
     noisy: torch.Tensor,
@@ -205,7 +237,7 @@ def main() -> None:
         "--method",
         action="append",
         required=True,
-        help="Repeatable: name=type:path, type in pred|hybrid_ckpt|cnn_only_ckpt|hybrid_no_gate_ckpt",
+        help="Repeatable: name=type:path, type in pred|bm3d|hybrid_ckpt|cnn_only_ckpt|hybrid_no_gate_ckpt",
     )
     parser.add_argument("--datasets", type=str, default="", help="Optional comma separated dataset names. Empty means all.")
     parser.add_argument("--base-ch", type=int, default=32)
@@ -230,7 +262,7 @@ def main() -> None:
 
     models: dict[str, nn.Module] = {}
     for m in method_specs:
-        if m.mtype != "pred":
+        if m.mtype not in {"pred", "bm3d"}:
             models[m.name] = build_model(
                 m.mtype,
                 m.payload,
@@ -271,19 +303,27 @@ def main() -> None:
                     if method.mtype == "pred":
                         pred_path = pred_map.get(key) if pred_map is not None else None
                         if pred_path is None:
-                            continue
+                            raise FileNotFoundError(
+                                "Missing prediction for "
+                                f"method={method.name}, dataset={dataset}, "
+                                f"sigma={sigma}, key={key}. "
+                                "External prediction folders must mirror the noisy set."
+                            )
                         pred = load_img(pred_path)
                     else:
                         noisy = load_img(noisy_map[key])
-                        model = models[method.name]
-                        pred = infer_model(
-                            model,
-                            noisy,
-                            sigma=sigma,
-                            device=device,
-                            tile_size=args.tile_size,
-                            tile_halo=args.tile_halo,
-                        )
+                        if method.mtype == "bm3d":
+                            pred = run_bm3d(noisy, sigma=sigma)
+                        else:
+                            model = models[method.name]
+                            pred = infer_model(
+                                model,
+                                noisy,
+                                sigma=sigma,
+                                device=device,
+                                tile_size=args.tile_size,
+                                tile_halo=args.tile_halo,
+                            )
 
                     pred, clean = align_pred_to_clean(pred, clean)
                     pred = torch.nan_to_num(pred, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
